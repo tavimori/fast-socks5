@@ -21,6 +21,11 @@ use tokio::net::{TcpListener, TcpStream, ToSocketAddrs as AsyncToSocketAddrs};
 use tokio::time::timeout;
 use tokio::try_join;
 use tokio_stream::Stream;
+use tokio::net::TcpSocket;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd};
+use socket2::SockRef;
+use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct Config {
@@ -33,6 +38,8 @@ pub struct Config {
     /// Enable command execution
     execute_command: bool,
     auth: Option<Arc<dyn Authentication>>,
+    /// default outgoing src-ip
+    default_src_ip: Option<IpAddr>,
 }
 
 impl Default for Config {
@@ -43,6 +50,7 @@ impl Default for Config {
             dns_resolve: true,
             execute_command: true,
             auth: None,
+            default_src_ip: None,
         }
     }
 }
@@ -98,6 +106,12 @@ impl Config {
     /// Will the server perform dns resolve
     pub fn set_dns_resolve(&mut self, value: bool) -> &mut Self {
         self.dns_resolve = value;
+        self
+    }
+
+    /// Set the default source IP for clients
+    pub fn set_default_src_ip(&mut self, value: String) -> &mut Self {
+        self.default_src_ip = Some(IpAddr::from_str(&value[..]).unwrap());
         self
     }
 }
@@ -527,8 +541,33 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Socks5Socket<T> {
             .to_socket_addrs()?
             .next()
             .context("unreachable")?;
+        
+        let fut = match self.config.default_src_ip {
+            Some(src_addr) => {
+                // TODO: support both v4 and v6 address
+                let socket = match src_addr {
+                    IpAddr::V4(_) => TcpSocket::new_v4()?,
+                    IpAddr::V6(_) => TcpSocket::new_v6()?,
+                };
 
-        let fut = TcpStream::connect(addr);
+                {
+                    let rawsockfd = socket.as_raw_fd();
+                    let sockref = SockRef::from(&rawsockfd);
+                    sockref.set_ip_transparent(true).unwrap(); // CAP_NETADMIN needed
+                }
+                socket.set_reuseaddr(true)?;
+                // FIXME: should be unwrap?
+                socket.bind(SocketAddr::new(src_addr, 0))?;
+                socket.connect(addr)
+            },
+            None => {
+                // TcpStream::connect(addr)
+                // FIXME: should also support v4
+                let socket = TcpSocket::new_v6()?;
+                socket.connect(addr)
+            }
+        };
+
         let limit = Duration::from_secs(self.config.request_timeout);
 
         // TCP connect with timeout, to avoid memory leak for connection that takes forever

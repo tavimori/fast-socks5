@@ -41,6 +41,9 @@ struct Opt {
     /// Don't perform the auth handshake, send directly the command request
     #[structopt(short = "k", long)]
     pub skip_auth: bool,
+
+    #[structopt(short, long)]
+    pub source_addr: String,
 }
 
 /// Choose the authentication type
@@ -75,6 +78,7 @@ async fn spawn_socks_server() -> Result<()> {
     let mut config = Config::default();
     config.set_request_timeout(opt.request_timeout);
     config.set_skip_auth(opt.skip_auth);
+    config.set_default_src_ip(opt.source_addr);
 
     match opt.auth {
         AuthMode::NoAuth => warn!("No authentication has been set!"),
